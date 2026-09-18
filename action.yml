@@ -1,0 +1,171 @@
+name: Serverless deployment
+description: >-
+  Deploys a serverless stack to every region a stage spans, in dependency
+  order, and moves the tag that records what the stage is running.
+author: Malyavi
+
+branding:
+  icon: cloud-lightning
+  color: orange
+
+inputs:
+  stage:
+    description: >-
+      Stage to deploy. Required, and deliberately undefaulted: a deployment
+      goes somewhere specific, so this action will not guess at it.
+    required: true
+  regions:
+    description: >-
+      The regions to deploy, comma-separated, overriding everything below. The
+      first is treated as the main one.
+    required: false
+    default: ''
+  main-region:
+    description: >-
+      The region the stack is built around. Read out of the configuration file
+      when unset, so the file and the deployment cannot disagree.
+    required: false
+    default: ''
+  main-region-key:
+    description: The key the main region is read from, under the configuration's own `custom:` block.
+    required: false
+    default: mainRegion
+  secondary-region:
+    description: >-
+      The stage's second region, if it has one. Defaults to the variable the
+      configuration itself reads, so a stage whose environment sets it needs
+      nothing passed here.
+    required: false
+    default: ''
+  secondary-region-variable:
+    description: >-
+      The environment variable the configuration reads its second region from.
+      It is set for every region of the run, so the template resolves the way
+      it did when it was validated.
+    required: false
+    default: SECONDARY_REGION
+  only-region:
+    description: >-
+      Deploy one region of the stage rather than all of them, for bringing a
+      region up or repairing it. A region the stage does not span is refused.
+    required: false
+    default: ''
+  order:
+    description: >-
+      `secondary-first` (the default), `main-first`, or `as-listed`. The
+      default exists because a resource the main region owns can name something
+      only the other region's stack creates.
+    required: false
+    default: secondary-first
+  config-file:
+    description: >-
+      The serverless configuration. Read for the main region, never parsed as
+      YAML — it is full of expressions no plain parser resolves.
+    required: false
+    default: serverless.yml
+  install:
+    description: Whether to install dependencies before deploying.
+    required: false
+    default: 'true'
+  install-command:
+    description: How to install them.
+    required: false
+    default: npm ci
+  deploy-command:
+    description: >-
+      The command that deploys. `--stage` and `--region` are appended to it,
+      followed by `deploy-args`.
+    required: false
+    default: npx osls deploy
+  deploy-args:
+    description: Extra arguments for the deploy command.
+    required: false
+    default: '--verbose'
+  extra-env:
+    description: >-
+      Extra variables the configuration resolves at deploy time, as `KEY=value`
+      entries separated by commas or newlines.
+    required: false
+    default: ''
+  move-tag:
+    description: >-
+      Whether to move the tag that records what the stage is running. It moves
+      only after every region has finished, so it can never claim a deployment
+      half the stack never received.
+    required: false
+    default: 'true'
+  tag-prefix:
+    description: Prefix of that tag; the stage is appended to it.
+    required: false
+    default: ci/deployed
+  tag:
+    description: The tag's full name, when the prefix and stage do not compose it.
+    required: false
+    default: ''
+  sha:
+    description: The commit the tag should record. Defaults to the commit being run.
+    required: false
+    default: ''
+  label:
+    description: How the run is named in the messages it writes.
+    required: false
+    default: Deployment
+  working-directory:
+    description: Directory holding the serverless configuration.
+    required: false
+    default: '.'
+  github-token:
+    description: >-
+      Token used to move the tag. Needs `contents: write`; leave `move-tag` off
+      if the job has no such permission.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  outcome:
+    description: '`passed` or `failed`.'
+    value: ${{ steps.deploy.outputs.outcome }}
+  stage:
+    description: The stage that was deployed.
+    value: ${{ steps.deploy.outputs.stage }}
+  regions:
+    description: The regions that finished, comma-separated and in deployment order.
+    value: ${{ steps.deploy.outputs.regions }}
+  tag:
+    description: The tag this run used.
+    value: ${{ steps.deploy.outputs.tag }}
+  deployed-sha:
+    description: The commit the tag now records, or empty when it did not move.
+    value: ${{ steps.deploy.outputs.deployed-sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: Deploy the stack
+      id: deploy
+      shell: bash
+      env:
+        # A composite action does not populate INPUT_* for its own run steps,
+        # so every input is mapped here and read through lib/inputs.mjs.
+        INPUT_STAGE: ${{ inputs.stage }}
+        INPUT_REGIONS: ${{ inputs.regions }}
+        INPUT_MAIN_REGION: ${{ inputs.main-region }}
+        INPUT_MAIN_REGION_KEY: ${{ inputs.main-region-key }}
+        INPUT_SECONDARY_REGION: ${{ inputs.secondary-region }}
+        INPUT_SECONDARY_REGION_VARIABLE: ${{ inputs.secondary-region-variable }}
+        INPUT_ONLY_REGION: ${{ inputs.only-region }}
+        INPUT_ORDER: ${{ inputs.order }}
+        INPUT_CONFIG_FILE: ${{ inputs.config-file }}
+        INPUT_INSTALL: ${{ inputs.install }}
+        INPUT_INSTALL_COMMAND: ${{ inputs.install-command }}
+        INPUT_DEPLOY_COMMAND: ${{ inputs.deploy-command }}
+        INPUT_DEPLOY_ARGS: ${{ inputs.deploy-args }}
+        INPUT_EXTRA_ENV: ${{ inputs.extra-env }}
+        INPUT_MOVE_TAG: ${{ inputs.move-tag }}
+        INPUT_TAG_PREFIX: ${{ inputs.tag-prefix }}
+        INPUT_TAG: ${{ inputs.tag }}
+        INPUT_SHA: ${{ inputs.sha }}
+        INPUT_LABEL: ${{ inputs.label }}
+        INPUT_WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: node "$GITHUB_ACTION_PATH/scripts/deploy.mjs"
