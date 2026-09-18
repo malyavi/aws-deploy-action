@@ -1,10 +1,10 @@
-import {writeFileSync}                                  from 'node:fs';
-import {afterEach, describe, it}                         from 'node:test';
-import assert                                            from 'node:assert/strict';
-import {deployEnv, deployedTag, parseEnv, resolveConfig} from '../lib/config.mjs';
-import {ConfigError}                                     from '../lib/inputs.mjs';
+import {writeFileSync}                                       from 'node:fs';
+import {afterEach, describe, it}                             from 'node:test';
+import assert                                                from 'node:assert/strict';
+import {deployEnv, deployedTag, parseEnv, resolveConfig}     from '../lib/config.mjs';
+import {ConfigError}                                         from '../lib/inputs.mjs';
 import {deploymentOrder, mainRegion, ORDERS, resolveRegions} from '../lib/regions.mjs';
-import {summaryDeployed, summaryFailed}                  from '../lib/report.mjs';
+import {summaryDeployed, summaryFailed}                      from '../lib/report.mjs';
 
 /**
  * Which regions are deployed, in which order, and what the tag ends up saying.
