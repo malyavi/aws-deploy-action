@@ -1,0 +1,171 @@
+name: PR Validation
+
+# `tests` asks whether the logic is right; `smoke` asks whether the action runs.
+#
+# Nothing is deployed and no tag is moved. The smoke job drives the action with
+# a stand-in deployer — `test/fixtures/fake-deploy.mjs`, which asserts the
+# contract this action owns and logs the region it was called for — so the
+# order the regions are deployed in, the refusals, and the half-finished
+# multi-region case are all exercised for real. Whether `osls deploy` can
+# deploy is the caller's tool doing the caller's job, and it needs an AWS
+# account to answer.
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Check that action.yml parses
+        run: |
+          pip install --quiet --disable-pip-version-check pyyaml
+          python3 test/check-action-yaml.py
+
+  smoke:
+    name: Smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 'lts/*'
+
+      - name: Build the fixture project
+        run: |
+          mkdir -p "${{ runner.temp }}/project/tools"
+          cp test/fixtures/serverless.yml "${{ runner.temp }}/project/"
+          cp test/fixtures/fake-deploy.mjs "${{ runner.temp }}/project/tools/"
+
+      - name: Run with no stage
+        id: no-stage
+        uses: ./
+        continue-on-error: true
+        with:
+          stage: ''
+          working-directory: ${{ runner.temp }}/project
+          deploy-command: node tools/fake-deploy.mjs
+          install: 'false'
+          move-tag: 'false'
+
+      - name: Check that it refused rather than guessing
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [ "${{ steps.no-stage.outcome }}" = "failure" ] || fail "A run with no stage must fail; it reported '${{ steps.no-stage.outcome }}'."
+
+      # The order is the thing being asserted: the secondary region first,
+      # because a resource the main region owns can name something only the
+      # other region's stack creates.
+      - name: Deploy a two-region stage
+        id: both
+        uses: ./
+        with:
+          stage: staging
+          working-directory: ${{ runner.temp }}/project
+          secondary-region: us-west-1
+          deploy-command: node tools/fake-deploy.mjs
+          install: 'false'
+          move-tag: 'false'
+
+      - name: Check the order they were deployed in
+        run: |
+          cd "${{ runner.temp }}/project"
+          fail() { echo "::error::$1"; exit 1; }
+          echo "regions output: '${{ steps.both.outputs.regions }}'"
+          cat deployed.log
+          [ "${{ steps.both.outputs.outcome }}" = "passed" ] || fail "Expected 'passed', got '${{ steps.both.outputs.outcome }}'."
+          [ "${{ steps.both.outputs.regions }}" = "us-west-1,us-east-1" ] || fail "The secondary region must be deployed first and the main region last; the run reported '${{ steps.both.outputs.regions }}'."
+          [ "$(sed -n 1p deployed.log | cut -d' ' -f1)" = "us-west-1" ] || fail "The deployer was called for the wrong region first: $(cat deployed.log)"
+          grep -q 'us-east-1 stage=staging secondary=us-west-1' deployed.log || fail "The main region was deployed without the stage's secondary region set, so its template resolved differently from the one that was validated: $(cat deployed.log)"
+          [ -z "${{ steps.both.outputs.deployed-sha }}" ] || fail "move-tag was off, so deployed-sha must be empty; it was '${{ steps.both.outputs.deployed-sha }}'."
+          [ "${{ steps.both.outputs.tag }}" = "ci/deployed/staging" ] || fail "Expected the tag to be composed from the prefix and the stage, got '${{ steps.both.outputs.tag }}'."
+          rm -f deployed.log
+
+      - name: Deploy one region of the stage
+        id: one
+        uses: ./
+        with:
+          stage: staging
+          working-directory: ${{ runner.temp }}/project
+          secondary-region: us-west-1
+          only-region: us-east-1
+          deploy-command: node tools/fake-deploy.mjs
+          install: 'false'
+          move-tag: 'false'
+
+      - name: Check that only that region was deployed
+        run: |
+          cd "${{ runner.temp }}/project"
+          fail() { echo "::error::$1"; exit 1; }
+          [ "${{ steps.one.outputs.regions }}" = "us-east-1" ] || fail "Expected one region, got '${{ steps.one.outputs.regions }}'."
+          [ "$(wc -l < deployed.log)" -eq 1 ] || fail "The deployer ran more than once: $(cat deployed.log)"
+          rm -f deployed.log
+
+      - name: Refuse a region the stage does not span
+        id: elsewhere
+        uses: ./
+        continue-on-error: true
+        with:
+          stage: staging
+          working-directory: ${{ runner.temp }}/project
+          secondary-region: us-west-1
+          only-region: eu-west-1
+          deploy-command: node tools/fake-deploy.mjs
+          install: 'false'
+          move-tag: 'false'
+
+      - name: Check that it refused, and deployed nothing
+        run: |
+          cd "${{ runner.temp }}/project"
+          fail() { echo "::error::$1"; exit 1; }
+          # Deploying to a region the stage has no template for creates a stack
+          # nothing will ever update again.
+          [ "${{ steps.elsewhere.outcome }}" = "failure" ] || fail "A region the stage does not span must be refused."
+          [ ! -f deployed.log ] || fail "It refused but still called the deployer: $(cat deployed.log)"
+
+      # A multi-region run that fails halfway leaves the stage inconsistent,
+      # and the report has to say which regions landed.
+      - name: A region that fails partway
+        id: partial
+        uses: ./
+        continue-on-error: true
+        env:
+          FAKE_FAIL_REGION: us-east-1
+        with:
+          stage: staging
+          working-directory: ${{ runner.temp }}/project
+          secondary-region: us-west-1
+          deploy-command: node tools/fake-deploy.mjs
+          install: 'false'
+          move-tag: 'false'
+
+      - name: Check what it reported having deployed
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [ "${{ steps.partial.outcome }}" = "failure" ] || fail "A failed region must fail the run."
+          [ "${{ steps.partial.outputs.regions }}" = "us-west-1" ] || fail "The regions output must name the ones that finished, so somebody can see what is now inconsistent; it reported '${{ steps.partial.outputs.regions }}'."
+          [ -z "${{ steps.partial.outputs.deployed-sha }}" ] || fail "A half-finished run must not move the tag."
